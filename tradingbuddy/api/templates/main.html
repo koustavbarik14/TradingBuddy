@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <h1>TradingBuddy — Main</h1>
+  <form method="get" action="{{ url_for('index') }}" class="form-inline">
+    <label>Symbol: <input type="text" name="symbol" value="{{ symbol }}"></label>
+    <label>Period:
+      <select name="period">
+        {% for p in periods %}
+          <option value="{{ p }}" {% if p==period_key %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Load</button>
+  </form>
+
+  <div class="row">
+    <div class="col-8">
+      {% if chart_div %}
+        <div id="chart">{{ chart_div | safe }}</div>
+      {% else %}
+        <p>No data to show for {{ symbol }}.</p>
+      {% endif %}
+    </div>
+    <div class="col-4 info-panel">
+      <h3>{{ symbol }}</h3>
+      {% if info and info.last_close is defined %}
+        <p>Last: <strong>{{ info.last_close }}</strong></p>
+        <p>Change: <strong>{% if info.pct_change is not none %}{{ info.pct_change|round(2) }}%{% else %}N/A{% endif %}</strong></p>
+        <p>Volume: <strong>{% if info.volume %}{{ info.volume }}{% else %}N/A{% endif %}</strong></p>
+        <p>RSI: <strong>{% if info.rsi %}{{ info.rsi|round(2) }}{% else %}N/A{% endif %}</strong></p>
+        <p>SMA20 vs SMA50: <strong>{% if info.sma_cross %}{{ info.sma_cross }}{% else %}N/A{% endif %}</strong></p>
+      {% else %}
+        <p>No metrics available.</p>
+      {% endif %}
+    </div>
+  </div>
+
+{% endblock %}

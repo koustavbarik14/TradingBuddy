@@ -1,0 +1,18 @@
+pandas
+numpy
+yfinance
+pandas_ta
+streamlit
+plotly
+scikit-learn
+sqlalchemy
+requests
+fastapi
+uvicorn[standard]
+apscheduler
+pytest
+flask
+waitress
+# Optional / advanced (install later)
+# nixtla  # TimeGPT / Nixtla (optional)
+# torch   # if you plan to run deep learning models locally

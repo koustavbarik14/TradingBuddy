@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h2>Breakouts</h2>
+
+<form method="get" class="form-inline" style="margin-bottom:1rem;">
+  Lookback (days): <input name="lookback" value="{{ lookback|default(30) }}" />
+  Volume multiplier: <input name="volume_multiplier" value="{{ volume_multiplier|default(1.5) }}" />
+  Page size: <input name="page_size" value="{{ page_size|default(25) }}" />
+  <button type="submit">Scan</button>
+  <a class="button" href="{{ url_for('index') }}">Back</a>
+</form>
+
+<table class="table">
+  <thead>
+    <tr>
+      <th><a href="?sort_by=symbol&sort_dir={{ 'asc' if sort_dir=='desc' else 'desc' }}">Symbol</a></th>
+      <th><a href="?sort_by=result&sort_dir={{ 'asc' if sort_dir=='desc' else 'desc' }}">Result</a></th>
+      <th><a href="?sort_by=level&sort_dir={{ 'asc' if sort_dir=='desc' else 'desc' }}">Level</a></th>
+      <th><a href="?sort_by=volume_ratio&sort_dir={{ 'asc' if sort_dir=='desc' else 'desc' }}">Volume Ratio</a></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in items %}
+      <tr>
+        <td><a href="/?symbol={{ r.symbol }}">{{ r.symbol }}</a></td>
+        <td>{{ r.result }}</td>
+        <td>{{ r.level }}</td>
+        <td>{{ r.volume_ratio }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="pagination">
+  <span>Page {{ page }} / {{ total_pages }} ({{ total }} results)</span>
+  {% if page > 1 %}
+    <a href="?page={{ page-1 }}&page_size={{ page_size }}">Previous</a>
+  {% endif %}
+  {% if page < total_pages %}
+    <a href="?page={{ page+1 }}&page_size={{ page_size }}">Next</a>
+  {% endif %}
+</div>
+
+{% endblock %}
