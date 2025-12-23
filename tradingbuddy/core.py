@@ -20,6 +20,10 @@ class DataIngestion:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_tables()
 
+    def _connect(self):
+        """Return the active sqlite3 connection (kept for compatibility with context usage)."""
+        return self.conn
+
     def create_tables(self):
         cursor = self.conn.cursor()
         cursor.execute(
@@ -63,6 +67,40 @@ class DataIngestion:
                 industry TEXT,
                 country TEXT,
                 exchange TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                notes TEXT,
+                created_at TEXT
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                entry_date TEXT,
+                entry_price REAL,
+                size REAL,
+                status TEXT,
+                notes TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metrics (
+                symbol TEXT PRIMARY KEY,
+                last_updated TEXT,
+                score INTEGER,
+                payload TEXT
             )
             """
         )
@@ -287,6 +325,109 @@ class DataIngestion:
         cur.execute("SELECT DISTINCT symbol FROM price_data")
         rows = cur.fetchall()
         return [r[0] for r in rows]
+
+    def save_metrics(self, symbol: str, score: int, payload: dict):
+        """Save computed metrics (JSON payload) for a symbol into metrics table."""
+        import json
+        cur = self.conn.cursor()
+        now = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        cur.execute(
+            "INSERT OR REPLACE INTO metrics (symbol, last_updated, score, payload) VALUES (?, ?, ?, ?)",
+            (symbol, now, score, json.dumps(payload))
+        )
+        self.conn.commit()
+
+    def get_metrics(self, symbol: str) -> Optional[dict]:
+        """Return metrics record for a symbol or None."""
+        import json
+        cur = self.conn.cursor()
+        cur.execute("SELECT last_updated, score, payload FROM metrics WHERE symbol = ?", (symbol,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        last_updated, score, payload = row
+        try:
+            payload_obj = json.loads(payload) if payload else {}
+        except Exception:
+            payload_obj = {}
+        return {'symbol': symbol, 'last_updated': last_updated, 'score': score, 'payload': payload_obj}
+
+    # -----------------------------
+    # Watchlist / Positions helpers
+    # -----------------------------
+    def add_watchlist(self, symbol: str, notes: Optional[str] = None) -> int:
+        """Add a symbol to server-side watchlist. Returns the inserted row id."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO watchlist (symbol, notes, created_at) VALUES (?, ?, ?)",
+                (symbol.upper(), notes or "", datetime.utcnow().isoformat()),
+            )
+            return cursor.lastrowid
+
+    def list_watchlist(self) -> list:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, symbol, notes, created_at FROM watchlist ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            return [
+                {"id": r[0], "symbol": r[1], "notes": r[2], "created_at": r[3]} for r in rows
+            ]
+
+    def remove_watchlist(self, wid: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM watchlist WHERE id = ?", (wid,))
+            return cursor.rowcount > 0
+
+    def add_position(self, symbol: str, entry_date: str, entry_price: float, size: float, status: str = "open", notes: Optional[str] = None) -> int:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO positions (symbol, entry_date, entry_price, size, status, notes) VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol.upper(), entry_date, entry_price, size, status, notes or ""),
+            )
+            return cursor.lastrowid
+
+    def list_positions(self) -> list:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, symbol, entry_date, entry_price, size, status, notes FROM positions ORDER BY id DESC")
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "symbol": r[1],
+                    "entry_date": r[2],
+                    "entry_price": r[3],
+                    "size": r[4],
+                    "status": r[5],
+                    "notes": r[6],
+                }
+                for r in rows
+            ]
+
+    def update_position(self, pid: int, **fields) -> bool:
+        allowed = {"entry_date", "entry_price", "size", "status", "notes"}
+        set_parts = []
+        params = []
+        for k, v in fields.items():
+            if k in allowed:
+                set_parts.append(f"{k} = ?")
+                params.append(v)
+        if not set_parts:
+            return False
+        params.append(pid)
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE positions SET {', '.join(set_parts)} WHERE id = ?", tuple(params))
+            return cursor.rowcount > 0
+
+    def remove_position(self, pid: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM positions WHERE id = ?", (pid,))
+            return cursor.rowcount > 0
 
     def get_fundamental_data(self, symbol: str) -> Dict:
         query = f"SELECT * FROM fundamental_data WHERE symbol = '{symbol}'"

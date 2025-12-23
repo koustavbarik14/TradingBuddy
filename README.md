@@ -60,6 +60,22 @@ Run in production with waitress (call the factory). This will invoke the
 
 	The `--call` form tells waitress to call the factory function and use the returned WSGI app.
 
+Frontend (React) quick start
+--------------------------------
+If you want the React front-end prototype that accompanies the screener, there's a `frontend/` folder with a basic React app. To run it:
+
+Windows PowerShell:
+
+```powershell
+cd frontend
+npm install
+# copy .env.example to .env and add your Alpha Vantage key
+# (PowerShell) Copy-Item .env.example .env
+npm start
+```
+
+The frontend will run at http://localhost:3000 and can be used alongside the Flask backend. By default the frontend fetches data from public APIs (Alpha Vantage / Yahoo) client-side — it does not require the Flask backend, but you can extend it later to proxy requests to avoid CORS or hide API keys.
+
 5) Run tests
 
 ```bash

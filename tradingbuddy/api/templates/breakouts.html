@@ -11,7 +11,7 @@
   <a class="button" href="{{ url_for('index') }}">Back</a>
 </form>
 
-<table class="table">
+<table id="breakouts-table" class="table">
   <thead>
     <tr>
       <th><a href="?sort_by=symbol&sort_dir={{ 'asc' if sort_dir=='desc' else 'desc' }}">Symbol</a></th>
@@ -41,5 +41,20 @@
     <a href="?page={{ page+1 }}&page_size={{ page_size }}">Next</a>
   {% endif %}
 </div>
+
+<script>
+  // Initialize DataTables on the breakouts table for search/sort/pagination
+  document.addEventListener('DOMContentLoaded', function () {
+    try {
+      $('#breakouts-table').DataTable({
+        pageLength: {{ page_size|default(25) }},
+        ordering: true
+      });
+    } catch (e) {
+      // silently fail if DataTables isn't available
+      console.warn('DataTables init failed', e);
+    }
+  });
+</script>
 
 {% endblock %}

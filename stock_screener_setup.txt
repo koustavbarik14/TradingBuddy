@@ -1,0 +1,187 @@
+# Stock Screener - Complete Setup Guide
+
+## Prerequisites
+- Node.js (v16 or higher) - Download from https://nodejs.org/
+- VS Code installed
+- Basic command line familiarity
+
+## Project Structure
+```
+stock-screener/
+├── package.json
+├── .gitignore
+├── .env
+├── public/
+│   └── index.html
+├── src/
+│   ├── index.js
+│   ├── App.js
+│   ├── components/
+│   │   ├── StockCard.js
+│   │   ├── StockChart.js
+│   │   ├── Filters.js
+│   │   └── Watchlist.js
+│   ├── services/
+│   │   ├── apiService.js
+│   │   └── technicalAnalysis.js
+│   └── styles/
+│       └── App.css
+```
+
+## Step-by-Step Setup
+
+### 1. Create Project Folder
+```bash
+mkdir stock-screener
+cd stock-screener
+```
+
+### 2. Initialize React App
+```bash
+npx create-react-app .
+```
+
+### 3. Install Required Dependencies
+```bash
+npm install axios recharts date-fns
+```
+
+### 4. Get Free API Key
+1. Go to https://www.alphavantage.co/support/#api-key
+2. Enter your email and get your FREE API key
+3. Limit: 25 API calls per day (we'll optimize for this)
+
+Alternative: https://finnhub.io/ (60 calls/minute free)
+
+### 5. Create .env File
+In the root directory, create a file named `.env`:
+```
+REACT_APP_ALPHA_VANTAGE_KEY=your_api_key_here
+```
+
+Replace `your_api_key_here` with your actual API key.
+
+### 6. Update .gitignore
+Add to `.gitignore`:
+```
+.env
+node_modules/
+build/
+.DS_Store
+```
+
+## File Contents
+
+I'll provide all the code files in separate artifacts. Create each file in the exact location specified.
+
+## Running the Application
+
+### Development Mode
+```bash
+npm start
+```
+
+Opens at http://localhost:3000
+
+### Build for Production
+```bash
+npm run build
+```
+
+## Features Included
+
+✅ **Automated Stock Screening**
+- Scans 50+ popular US stocks
+- Technical indicator calculations (EMA, RSI, MACD)
+- Breakout pattern detection
+- Volume analysis
+
+✅ **Visual Dashboard**
+- Stock cards with key metrics
+- Score-based ranking (0-100)
+- Color-coded signals
+- Interactive charts
+
+✅ **Watchlist Management**
+- Add/remove stocks
+- Persistent storage (browser)
+- Quick access to tracked stocks
+
+✅ **Technical Analysis**
+- 20/50/200 day EMAs
+- RSI (14-period)
+- MACD signals
+- Volume trends
+- Support/resistance levels
+
+✅ **Filtering Options**
+- Minimum score threshold
+- Sector filtering
+- Sort by score, volume, or price change
+
+## API Rate Limit Management
+
+With Alpha Vantage's 25 calls/day limit:
+- Screen updates once per day
+- Cache results in browser
+- Pre-selected list of 50 liquid stocks
+- Manual refresh button (use wisely)
+
+## Customization
+
+### Change Stock Universe
+Edit `src/services/apiService.js` - modify the `STOCK_UNIVERSE` array
+
+### Adjust Scoring Weights
+Edit `src/services/technicalAnalysis.js` - modify the `calculateScore` function
+
+### Change Technical Parameters
+- RSI periods
+- EMA lengths
+- Volume thresholds
+All configurable in `technicalAnalysis.js`
+
+## Troubleshooting
+
+### "API key invalid"
+- Check your .env file
+- Ensure no spaces around the key
+- Restart the dev server after changing .env
+
+### "CORS error"
+- Alpha Vantage supports CORS
+- If issues persist, try Finnhub API instead
+
+### "Rate limit exceeded"
+- You've hit the 25 calls/day limit
+- Wait 24 hours or get another free key
+- Results are cached, so refresh the page to see cached data
+
+### Slow loading
+- API calls take 1-2 seconds each
+- With 50 stocks, initial load takes 2-3 minutes
+- Results cached for 24 hours
+
+## Next Steps
+
+1. Run the app and let it complete the initial scan
+2. Review the top-scored stocks
+3. Add promising ones to your watchlist
+4. Check charts on Trading 212 for final confirmation
+5. Update once daily (preferably after market close)
+
+## Production Deployment (Optional)
+
+Deploy free on:
+- **Vercel**: `npm install -g vercel` then `vercel`
+- **Netlify**: Drag-and-drop the `build` folder
+- **GitHub Pages**: Follow React docs
+
+## Cost
+- **Total: £0** (completely free)
+- Alpha Vantage: Free tier
+- Hosting: Optional, free tiers available
+- No credit card required
+
+## Support
+Check the console (F12 in browser) for error messages if something doesn't work.
