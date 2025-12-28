@@ -1,0 +1,583 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h2>Breakouts</h2>
+
+<div class="card">
+  <div class="card-row">
+    <label><strong>Timeframe:</strong></label>
+    <div style="display:flex; gap:8px; margin-right:20px;">
+      <button class="timeframe-btn active" data-timeframe="daily">Daily</button>
+      <button class="timeframe-btn" data-timeframe="weekly">Weekly</button>
+      <button class="timeframe-btn" data-timeframe="monthly">Monthly</button>
+    </div>
+    <label><strong>Max Results:</strong></label>
+    <input type="number" id="limitInput" value="{{ limit|default(10) }}" min="1" max="50" style="width:80px" />
+    <button id="scanBtn" class="btn">Scan for Breakouts</button>
+  </div>
+</div>
+
+<div id="loadingMsg" style="display:none; padding:20px; color:#b0b8c1; text-align:center;">
+  <p>🔍 Scanning for patterns...</p>
+</div>
+
+<table id="breakouts-table" class="table">
+  <thead>
+    <tr>
+      <th>Symbol</th>
+      <th>Pattern Type</th>
+      <th>Status</th>
+      <th style="cursor:pointer;" onclick="sortByConfidence()" title="Click to sort">Confidence % <span id="sort-indicator">▼</span></th>
+      <th>Entry Price</th>
+      <th>Breakout Date</th>
+      <th>Support</th>
+      <th>Resistance</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in items %}
+      <tr class="breakout-row" data-symbol="{{ r.symbol }}">
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td><span class="pattern-badge">{{ r.pattern }}</span></td>
+        <td>
+          {% if r.status == 'confirmed' %}
+            <span style="background:#10b981;color:#000;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">CONFIRMED</span>
+          {% else %}
+            <span style="background:#f59e0b;color:#000;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">FORMING</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if r.confidence >= 80 %}
+            <span class="confidence-score conf-high">{{ r.confidence }}%</span>
+          {% elif r.confidence >= 65 %}
+            <span class="confidence-score conf-med">{{ r.confidence }}%</span>
+          {% else %}
+            <span class="confidence-score conf-low">{{ r.confidence }}%</span>
+          {% endif %}
+        </td>
+        <td>${{ r.entry_price }}</td>
+        <td>{{ r.breakout_date }}</td>
+        <td>{{ r.support }}</td>
+        <td>{{ r.resistance }}</td>
+        <td>{{ r.description }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if items|length == 0 %}
+<div style="padding:40px; text-align:center; color:#b0b8c1;">
+  <p>No breakout patterns detected. Click "Scan for Breakouts" to run analysis.</p>
+</div>
+{% endif %}
+
+<hr style="margin:30px 0; border:none; border-top:1px solid #333;" />
+
+<div class="chart-controls" style="margin-bottom:15px; display:flex; gap:10px; align-items:center;">
+  <label style="color:#9ca3af; font-weight:600;">Views:</label>
+  <button class="chart-toggle-btn active" data-view="tradingview">Chart</button>
+  <button class="chart-toggle-btn" data-view="plotly">Breakout Analysis</button>
+</div>
+
+<div class="row">
+  <div class="col-8">
+    <div id="chart" style="width:100%;height:420px;">
+      <div id="chart-loading" style="padding:12px;color:#666;">Loading chart...</div>
+    </div>
+  </div>
+  <div class="col-4 info-panel">
+    <h3 id="info-symbol" style="color:#3b82f6; margin-bottom:10px;">--</h3>
+    <div id="info-company" style="color:#9ca3af; font-size:12px; margin-bottom:15px;"></div>
+    
+    <div id="stock-info-loading" style="padding:20px; text-align:center; color:#666;">
+      Select a stock to view details
+    </div>
+    
+    <div id="stock-info-content" style="display:none;">
+      <!-- Price Data -->
+      <div class="info-section">
+        <h4>Price Data</h4>
+        <table class="info-table">
+          <tr><td>Open:</td><td id="info-open">--</td></tr>
+          <tr><td>High:</td><td id="info-high">--</td></tr>
+          <tr><td>Low:</td><td id="info-low">--</td></tr>
+          <tr><td>Close:</td><td id="info-close" style="font-weight:bold;">--</td></tr>
+          <tr><td>Volume:</td><td id="info-volume">--</td></tr>
+        </table>
+      </div>
+      
+      <!-- Technical Indicators -->
+      <div class="info-section">
+        <h4>Indicators</h4>
+        <table class="info-table">
+          <tr><td>RSI (14):</td><td id="info-rsi">--</td></tr>
+        </table>
+      </div>
+      
+      <!-- Fundamentals -->
+      <div class="info-section">
+        <h4>Fundamentals</h4>
+        <table class="info-table">
+          <tr><td>Market Cap:</td><td id="info-mcap">--</td></tr>
+          <tr><td>P/E Ratio:</td><td id="info-pe">--</td></tr>
+          <tr><td>52W High:</td><td id="info-52h">--</td></tr>
+          <tr><td>52W Low:</td><td id="info-52l">--</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+<script>
+  const API_BASE = 'http://127.0.0.1:5000';
+  let currentSymbol = null;
+  let currentTimeframe = 'daily';
+  let currentChartView = 'tradingview'; // 'tradingview' or 'plotly'
+  let currentStockInfo = null; // Cache stock info
+
+  let currentSortDirection = 'desc'; // 'desc' or 'asc'
+  let allPatternsData = []; // Store all patterns for sorting
+  
+  function sortByConfidence() {
+    // Toggle sort direction
+    currentSortDirection = currentSortDirection === 'desc' ? 'asc' : 'desc';
+    document.getElementById('sort-indicator').textContent = currentSortDirection === 'desc' ? '▼' : '▲';
+    
+    // Sort the data
+    allPatternsData.sort((a, b) => {
+      if (currentSortDirection === 'desc') {
+        return b.confidence - a.confidence;
+      } else {
+        return a.confidence - b.confidence;
+      }
+    });
+    
+    // Re-render table
+    renderPatternsTable(allPatternsData);
+  }
+  
+  async function scanBreakouts() {
+    const limit = document.getElementById('limitInput').value;
+    const loadingMsg = document.getElementById('loadingMsg');
+    const table = document.getElementById('breakouts-table').getElementsByTagName('tbody')[0];
+    
+    loadingMsg.style.display = 'block';
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/ml_breakouts?limit=${limit}&timeframe=${currentTimeframe}`);
+      const data = await res.json();
+      
+      // Store data for sorting
+      allPatternsData = data;
+      
+      // Clear table
+      table.innerHTML = '';
+      
+      // Render the table (no filtering)
+      renderPatternsTable(data);
+      
+    } catch (e) {
+      console.error('Breakout scanning failed:', e);
+      table.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#dc2626; padding:20px;">Error scanning for breakouts</td></tr>';
+    } finally {
+      loadingMsg.style.display = 'none';
+    }
+  }
+  
+  function renderPatternsTable(filteredData) {
+    const table = document.querySelector('#breakouts-table tbody');
+    table.innerHTML = '';
+      
+      if (!filteredData || filteredData.length === 0) {
+        table.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:#b0b8c1;">No patterns found</td></tr>';
+      } else {
+        // Populate table with results
+        filteredData.forEach((pattern, index) => {
+          const row = document.createElement('tr');
+          row.className = 'breakout-row';
+          row.dataset.symbol = pattern.symbol;
+          
+          const confidenceColor = pattern.confidence >= 80 ? '#10b981' : 
+                                 pattern.confidence >= 65 ? '#3b82f6' : '#f59e0b';
+          
+          const statusBadge = pattern.status === 'forming' 
+            ? '<span style="background:#f59e0b;color:#000;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">FORMING</span>'
+            : '<span style="background:#10b981;color:#000;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">CONFIRMED</span>';
+          
+          // Format pattern types (capitalize each word)
+          const formattedPatterns = pattern.pattern_type
+            .split(', ')
+            .map(p => p.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
+            .join(', ');
+          
+          row.innerHTML = `
+            <td><strong>${pattern.symbol}</strong></td>
+            <td><span class="pattern-badge">${formattedPatterns}</span></td>
+            <td>${statusBadge}</td>
+            <td>
+              <span class="confidence-score" style="background: ${confidenceColor}">
+                ${pattern.confidence.toFixed(1)}%
+              </span>
+            </td>
+            <td>$${pattern.entry_price.toFixed(2)}</td>
+            <td>${pattern.breakout_date}</td>
+            <td>${pattern.support_level ? '$' + pattern.support_level.toFixed(2) : 'N/A'}</td>
+            <td>${pattern.resistance_level ? '$' + pattern.resistance_level.toFixed(2) : 'N/A'}</td>
+            <td>${pattern.description}</td>
+          `;
+          
+          // Click handler to load chart
+          row.style.cursor = 'pointer';
+          row.addEventListener('click', () => showChart(pattern.symbol, currentTimeframe));
+          
+          table.appendChild(row);
+        });
+
+        // Load first breakout's chart by default
+        if (filteredData.length > 0) {
+          showChart(filteredData[0].symbol, currentTimeframe);
+          // Highlight first row
+          document.querySelector('.breakout-row').style.backgroundColor = 'rgba(37, 99, 235, 0.1)';
+        }
+        
+        // Setup click handlers for newly rendered rows
+        setupRowClickHandlers();
+      }
+  }
+
+  async function showChart(symbol, timeframe = 'daily') {
+    if (currentSymbol) {
+      const prevRow = document.querySelector(`.breakout-row[data-symbol="${currentSymbol}"]`);
+      if (prevRow) prevRow.style.backgroundColor = '';
+    }
+    
+    currentSymbol = symbol;
+    const row = document.querySelector(`.breakout-row[data-symbol="${symbol}"]`);
+    if (row) row.style.backgroundColor = 'rgba(37, 99, 235, 0.1)';
+
+    // Fetch stock info
+    document.getElementById('stock-info-loading').style.display = 'block';
+    document.getElementById('stock-info-content').style.display = 'none';
+    
+    try {
+      const infoRes = await fetch(`${API_BASE}/api/stock_info/${symbol}`);
+      const stockInfo = await infoRes.json();
+      currentStockInfo = stockInfo;
+      
+      // Update info panel
+      updateStockInfo(stockInfo);
+      
+      // Load appropriate chart based on current view
+      if (currentChartView === 'tradingview') {
+        await loadTradingViewChart(symbol, stockInfo, timeframe);
+      } else {
+        await loadPlotlyChart(symbol, timeframe);
+      }
+    } catch (e) {
+      console.error('Chart/info loading failed', e);
+      document.getElementById('chart').innerHTML = '<div style="padding:20px;color:#b0b8c1;">Chart unavailable</div>';
+      document.getElementById('stock-info-loading').innerText = 'Error loading stock info';
+    }
+  }
+  
+  function updateStockInfo(info) {
+    document.getElementById('info-symbol').innerText = info.symbol;
+    document.getElementById('info-company').innerText = info.company_name || info.symbol;
+    
+    // Show content, hide loading
+    document.getElementById('stock-info-loading').style.display = 'none';
+    document.getElementById('stock-info-content').style.display = 'block';
+    
+    // Price data
+    document.getElementById('info-open').innerText = info.open ? `$${info.open.toFixed(2)}` : 'N/A';
+    document.getElementById('info-high').innerText = info.high ? `$${info.high.toFixed(2)}` : 'N/A';
+    document.getElementById('info-low').innerText = info.low ? `$${info.low.toFixed(2)}` : 'N/A';
+    document.getElementById('info-close').innerText = info.close ? `$${info.close.toFixed(2)}` : 'N/A';
+    document.getElementById('info-volume').innerText = info.volume ? info.volume.toLocaleString() : 'N/A';
+    
+    // Technical indicators
+    const rsi = info.rsi_14;
+    const rsiColor = rsi > 70 ? '#dc2626' : rsi < 30 ? '#10b981' : '#3b82f6';
+    document.getElementById('info-rsi').innerHTML = `<span style="color:${rsiColor}; font-weight:bold;">${rsi ? rsi.toFixed(2) : 'N/A'}</span>`;
+    
+    // Fundamentals
+    const mcap = info.market_cap;
+    const mcapStr = mcap ? (mcap >= 1e12 ? `$${(mcap/1e12).toFixed(2)}T` : 
+                             mcap >= 1e9 ? `$${(mcap/1e9).toFixed(2)}B` : 
+                             `$${(mcap/1e6).toFixed(2)}M`) : 'N/A';
+    document.getElementById('info-mcap').innerText = mcapStr;
+    document.getElementById('info-pe').innerText = info.pe_ratio ? info.pe_ratio.toFixed(2) : 'N/A';
+    document.getElementById('info-52h').innerText = info.week_52_high ? `$${info.week_52_high.toFixed(2)}` : 'N/A';
+    document.getElementById('info-52l').innerText = info.week_52_low ? `$${info.week_52_low.toFixed(2)}` : 'N/A';
+  }
+  
+  async function loadPlotlyChart(symbol, timeframe = 'daily') {
+    console.log('[Pattern Chart] Loading chart for symbol:', symbol, 'timeframe:', timeframe);
+    console.log('[Pattern Chart] currentTimeframe variable:', currentTimeframe);
+    const chartDiv = document.getElementById('chart');
+    chartDiv.innerHTML = '<div style="padding:40px;text-align:center;color:#666;">Loading pattern chart...</div>';
+    
+    try {
+      const url = `${API_BASE}/api/breakout_chart/${symbol}?timeframe=${timeframe}`;
+      console.log('[Pattern Chart] Fetching:', url);
+      const res = await fetch(url);
+      const data = await res.json();
+      console.log('[Pattern Chart] Response received');
+      
+      if (data.error) {
+        console.warn('[Pattern Chart] Error from API:', data.error);
+        chartDiv.innerHTML = `<div style="padding:40px;text-align:center;color:#ef4444;">${data.error}</div>`;
+        return;
+      }
+      
+      if (data.image) {
+        console.log('[Pattern Chart] Displaying static chart image');
+        chartDiv.innerHTML = `
+          <div style="width:100%;height:420px;display:flex;justify-content:center;align-items:center;background:#0f172a;">
+            <img src="${data.image}" alt="Breakout Pattern Chart" style="max-width:100%;max-height:100%;object-fit:contain;" />
+          </div>
+        `;
+        console.log('[Pattern Chart] Chart loaded successfully');
+      } else {
+        chartDiv.innerHTML = '<div style="padding:40px;text-align:center;color:#ef4444;">No chart data available</div>';
+      }
+    } catch (e) {
+      console.error('[Pattern Chart] Chart loading failed:', e);
+      chartDiv.innerHTML = '<div style="padding:40px;text-align:center;color:#ef4444;">Failed to load breakout analysis</div>';
+    }
+  }
+  
+  async function loadTradingViewChart(symbol, stockInfo, timeframe = 'daily') {
+    const chartDiv = document.getElementById('chart');
+    chartDiv.innerHTML = '<div id="tv_breakout_container" style="width:100%;height:420px;"></div>';
+    
+    const exchange = stockInfo.exchange || 'NASDAQ';
+    const tvSymbol = `${exchange}:${symbol}`;
+    
+    // Map timeframe to TradingView intervals: daily=D, weekly=W, monthly=M
+    const tvInterval = timeframe === 'weekly' ? 'W' : (timeframe === 'monthly' ? 'M' : 'D');
+    
+    try {
+      new TradingView.widget({
+        width: '100%',
+        height: 420,
+        symbol: tvSymbol,
+        interval: tvInterval,
+        timezone: 'Etc/UTC',
+        theme: 'Dark',
+        style: '1',
+        locale: 'en',
+        toolbar_bg: '#1a1f2e',
+        hide_top_toolbar: false,
+        allow_symbol_change: true,
+        container_id: 'tv_breakout_container'
+      });
+    } catch (e) {
+      console.error('TradingView widget failed', e);
+      chartDiv.innerHTML = '<div style="padding:20px;color:#b0b8c1;">Chart unavailable</div>';
+    }
+  }
+
+  document.getElementById('scanBtn').addEventListener('click', scanBreakouts);
+
+  // Chart view toggle listeners
+  document.querySelectorAll('.chart-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      const view = this.dataset.view;
+      console.log('[Toggle] Switching to view:', view);
+      
+      // Update button states
+      document.querySelectorAll('.chart-toggle-btn').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      
+      // Update current view
+      currentChartView = view;
+      console.log('[Toggle] Current symbol:', currentSymbol, 'Stock info:', currentStockInfo ? 'present' : 'null');
+      
+      // Reload chart with new view
+      if (currentSymbol && currentStockInfo) {
+        if (view === 'tradingview') {
+          console.log('[Toggle] Loading TradingView chart with timeframe:', currentTimeframe);
+          loadTradingViewChart(currentSymbol, currentStockInfo, currentTimeframe);
+        } else {
+          console.log('[Toggle] Loading Plotly chart with timeframe:', currentTimeframe);
+          loadPlotlyChart(currentSymbol, currentTimeframe);
+        }
+      } else {
+        console.warn('[Toggle] No symbol selected yet');
+      }
+    });
+  });
+
+  // Timeframe button listeners
+  document.querySelectorAll('.timeframe-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      // Remove active class from all buttons
+      document.querySelectorAll('.timeframe-btn').forEach(b => b.classList.remove('active'));
+      // Add active class to clicked button
+      this.classList.add('active');
+      // Update current timeframe
+      currentTimeframe = this.dataset.timeframe;
+      // Rescan with new timeframe
+      scanBreakouts();
+    });
+  });
+
+  // On page load, set up chart from first existing row
+  window.addEventListener('load', () => {
+    const firstRow = document.querySelector('.breakout-row');
+    if (firstRow) {
+      const symbol = firstRow.dataset.symbol;
+      showChart(symbol);
+      firstRow.style.backgroundColor = 'rgba(37, 99, 235, 0.1)';
+    }
+    
+    // Add click handlers to all rows (both Jinja-rendered and API-rendered)
+    setupRowClickHandlers();
+  });
+
+  function setupRowClickHandlers() {
+    document.querySelectorAll('.breakout-row').forEach(row => {
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => {
+        const symbol = row.dataset.symbol;
+        showChart(symbol);
+        
+        // Highlight this row
+        document.querySelectorAll('.breakout-row').forEach(r => r.style.backgroundColor = '');
+        row.style.backgroundColor = 'rgba(37, 99, 235, 0.1)';
+      });
+    });
+  }
+</script>
+
+<style>
+  .timeframe-btn {
+    padding: 6px 12px;
+    border: 1px solid #444;
+    background: #1a1f2e;
+    color: #b0b8c1;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+  }
+
+  .timeframe-btn:hover {
+    background: #252b3a;
+    border-color: #2563eb;
+  }
+
+  .timeframe-btn.active {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+  }
+  
+  .chart-toggle-btn {
+    padding: 8px 16px;
+    border: 1px solid #444;
+    background: #1a1f2e;
+    color: #b0b8c1;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+  }
+  
+  .chart-toggle-btn:hover {
+    background: #252b3a;
+    border-color: #10b981;
+  }
+  
+  .chart-toggle-btn.active {
+    background: #10b981;
+    color: #fff;
+    border-color: #10b981;
+  }
+
+  .pattern-badge {
+    display: inline-block;
+    background: #2563eb;
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .confidence-score {
+    display: inline-block;
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 13px;
+    min-width: 70px;
+    text-align: center;
+  }
+
+  .conf-high {
+    background: #10b981;
+  }
+
+  .conf-med {
+    background: #3b82f6;
+  }
+
+  .conf-low {
+    background: #f59e0b;
+  }
+  
+  .info-panel {
+    background: #1a1f2e;
+    border: 1px solid #2a2e3a;
+    border-radius: 8px;
+    padding: 15px;
+  }
+  
+  .info-section {
+    margin-bottom: 15px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #2a2e3a;
+  }
+  
+  .info-section:last-child {
+    border-bottom: none;
+  }
+  
+  .info-section h4 {
+    font-size: 13px;
+    color: #9ca3af;
+    margin: 0 0 8px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  
+  .info-table {
+    width: 100%;
+    font-size: 13px;
+  }
+  
+  .info-table td {
+    padding: 4px 0;
+    color: #b0b8c1;
+  }
+  
+  .info-table td:first-child {
+    color: #9ca3af;
+    width: 50%;
+  }
+  
+  .info-table td:last-child {
+    text-align: right;
+    font-weight: 600;
+  }
+</style>
+
+{% endblock %}

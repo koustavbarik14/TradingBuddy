@@ -1,0 +1,242 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <h1>Trades</h1>
+  <p>Create, edit and manage your trades. Use filters and sorting. Risk:Reward and P/L are calculated automatically.</p>
+
+  <div class="card">
+    <div class="card-row">
+      <button id="newTradeBtn" class="btn">New Trade</button>
+      <div style="flex:1"></div>
+      <button id="editTradeBtn" class="btn" style="background:#2563eb; display:none; margin-left:8px;">Edit</button>
+      <button id="deleteTradeBtn" class="btn" style="background:#dc2626; display:none; margin-left:4px;">Delete</button>
+    </div>
+  </div>
+
+  <table id="tradesTable" class="display" style="width:100%">
+    <thead>
+      <tr>
+        <th style="width:30px"><input type="checkbox" id="selectAllCheckbox" /></th>
+        <th>ID</th>
+        <th>Date</th>
+        <th>Symbol</th>
+        <th>Category</th>
+        <th>Entry</th>
+        <th>Exit</th>
+        <th>Size</th>
+        <th>Risk</th>
+        <th>Reward</th>
+        <th>R:R</th>
+        <th>P/L</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- Modal / simple form for create/edit -->
+  <div id="tradeFormModal">
+    <div>
+      <h3 id="formTitle">New Trade</h3>
+      <form id="tradeForm">
+        <input type="hidden" name="id" />
+        <div>
+          <label>Date<input type="date" name="date" required /></label>
+          <label>Symbol<input name="symbol" required /></label>
+          <label>Category<select name="category"><option>Stock</option><option>Option</option><option>ETF</option><option>Crypto</option><option>Other</option></select></label>
+        </div>
+        <div>
+          <label>Entry<input name="entry" type="number" step="0.0001" required /></label>
+          <label>Exit<input name="exit" type="number" step="0.0001" /></label>
+          <label>Size (units)<input name="size" type="number" step="0.01" /></label>
+        </div>
+        <div>
+          <label>Risk (per unit)<input name="risk" type="number" step="0.0001" /></label>
+          <label>Reward (per unit)<input name="reward" type="number" step="0.0001" /></label>
+        </div>
+        <div style="margin-top:8px">
+          <label>Notes<textarea name="notes" style="width:100%" rows="3"></textarea></label>
+        </div>
+        <div style="margin-top:8px;text-align:right">
+          <button type="button" id="cancelForm" class="btn">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://127.0.0.1:5000';
+    let tradesTable;
+    let selectedRows = new Set();
+
+    async function loadTrades(){
+      const res = await fetch(`${API_BASE}/api/positions`);
+      const data = await res.json();
+      const items = data.items || [];
+      const rows = items.map(it => ({
+        id: it.id,
+        date: it.entry_date || it.date || '',
+        symbol: it.symbol || '',
+        category: it.category || it.type || 'Stock',
+        entry: it.entry_price || it.entry_price || null,
+        exit: it.exit_price || it.exit_price || null,
+        size: it.size || it.position_size || null,
+        risk: it.risk || null,
+        reward: it.reward || null,
+        notes: it.notes || ''
+      }));
+      tradesTable.clear();
+      for (const r of rows){
+        const rr = computeRR(r);
+        const checkbox = `<input type="checkbox" class="row-checkbox" data-id="${r.id}" />`;
+        tradesTable.row.add([checkbox, r.id, r.date, r.symbol, r.category, r.entry, r.exit || '', r.size || '', r.risk || '', r.reward || '', rr.rr || '', rr.pnl || '', r.notes]);
+      }
+      tradesTable.draw();
+      setupCheckboxListeners();
+    }
+
+    function computeRR(row){
+      const entry = parseFloat(row.entry);
+      const exit = row.exit ? parseFloat(row.exit) : null;
+      const risk = row.risk ? parseFloat(row.risk) : null;
+      const reward = row.reward ? parseFloat(row.reward) : null;
+      let rr = null, pnl = null;
+      if (risk && reward) rr = (reward / risk).toFixed(2);
+      if (exit !== null && entry && row.size){
+        pnl = ((exit - entry) * parseFloat(row.size)).toFixed(2);
+      }
+      return { rr, pnl };
+    }
+
+    function setupCheckboxListeners() {
+      const checkboxes = document.querySelectorAll('.row-checkbox');
+      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+      
+      checkboxes.forEach(cb => {
+        cb.addEventListener('change', (e) => {
+          const id = parseInt(e.target.dataset.id);
+          if (e.target.checked) {
+            selectedRows.add(id);
+          } else {
+            selectedRows.delete(id);
+          }
+          updateActionButtons();
+        });
+      });
+      
+      selectAllCheckbox.addEventListener('change', (e) => {
+        checkboxes.forEach(cb => {
+          cb.checked = e.target.checked;
+          const id = parseInt(cb.dataset.id);
+          if (e.target.checked) {
+            selectedRows.add(id);
+          } else {
+            selectedRows.delete(id);
+          }
+        });
+        updateActionButtons();
+      });
+    }
+
+    function updateActionButtons() {
+      const editBtn = document.getElementById('editTradeBtn');
+      const deleteBtn = document.getElementById('deleteTradeBtn');
+      
+      if (selectedRows.size === 1) {
+        editBtn.style.display = 'inline-block';
+        deleteBtn.style.display = 'inline-block';
+      } else {
+        editBtn.style.display = 'none';
+        deleteBtn.style.display = 'none';
+      }
+    }
+
+    $(document).ready(function(){
+      tradesTable = $('#tradesTable').DataTable({ 
+        order:[[2,'desc']],
+        columnDefs: [
+          { orderable: false, targets: 0 }
+        ],
+        paging: false,
+        info: false,
+        searching: false
+      });
+
+      $('#filterInput').on('input', function(){ 
+        // Filter input removed
+      });
+
+      $('#newTradeBtn').on('click', ()=> openForm());
+
+      $('#editTradeBtn').on('click', async function(){
+        const id = Array.from(selectedRows)[0];
+        const res = await fetch(`${API_BASE}/api/positions`);
+        const data = await res.json();
+        const item = (data.items||[]).find(x=>x.id==id);
+        openForm(item);
+      });
+
+      $('#deleteTradeBtn').on('click', async function(){
+        const id = Array.from(selectedRows)[0];
+        if (!confirm('Delete trade #' + id + '?')) return;
+        await fetch(`${API_BASE}/api/positions/${id}`, { method: 'DELETE' });
+        selectedRows.clear();
+        await loadTrades();
+      });
+
+      $('#cancelForm').on('click', ()=> closeForm());
+
+      $('#tradeForm').on('submit', async function(e){
+        e.preventDefault();
+        const form = new FormData(this);
+        const payload = {};
+        for (const [k,v] of form.entries()){
+          if (k==='id') continue;
+          payload[k] = v;
+        }
+        const id = form.get('id');
+        if (id){
+          // PUT
+          const resp = await fetch(`${API_BASE}/api/positions/${id}`, { method: 'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+          await resp.json();
+        } else {
+          // POST
+          const resp = await fetch(`${API_BASE}/api/positions`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+          await resp.json();
+        }
+        closeForm();
+        selectedRows.clear();
+        await loadTrades();
+      });
+
+      // initial load
+      loadTrades();
+    });
+
+    function openForm(item){
+      const m = document.getElementById('tradeFormModal');
+      const f = document.getElementById('tradeForm');
+      f.reset();
+      if (item){
+        document.querySelector('input[name="id"]').value = item.id || '';
+        document.querySelector('input[name="date"]').value = item.entry_date ? item.entry_date.split('T')[0] : (item.date||'');
+        document.querySelector('input[name="symbol"]').value = item.symbol || '';
+        document.querySelector('select[name="category"]').value = item.category || 'Stock';
+        document.querySelector('input[name="entry"]').value = item.entry_price || '';
+        document.querySelector('input[name="exit"]').value = item.exit_price || '';
+        document.querySelector('input[name="size"]').value = item.size || item.position_size || '';
+        document.querySelector('input[name="risk"]').value = item.risk || '';
+        document.querySelector('input[name="reward"]').value = item.reward || '';
+        document.querySelector('textarea[name="notes"]').value = item.notes || '';
+        document.getElementById('formTitle').innerText = 'Edit Trade #' + (item.id||'');
+      } else {
+        document.getElementById('formTitle').innerText = 'New Trade';
+      }
+      m.style.display = 'flex';
+    }
+
+    function closeForm(){ document.getElementById('tradeFormModal').style.display = 'none'; }
+  </script>
+
+{% endblock %}

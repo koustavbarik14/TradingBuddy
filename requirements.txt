@@ -1,0 +1,16 @@
+flask
+apscheduler
+pandas
+numpy
+scipy
+yfinance
+requests
+waitress
+pytest
+pytest-cov
+pytest-mock
+finplot
+PyQt5
+mplfinance
+plotly
+streamlit
