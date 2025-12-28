@@ -104,6 +104,16 @@ class DataIngestion:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chart_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                config TEXT,
+                created_at TEXT
+            )
+            """
+        )
         self.conn.commit()
 
     def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -418,6 +428,56 @@ class DataIngestion:
         if not set_parts:
             return False
         params.append(pid)
+        cur = self.conn.cursor()
+        sql = f"UPDATE positions SET {', '.join(set_parts)} WHERE id = ?"
+        cur.execute(sql, params)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # -----------------------------
+    # Chart configuration helpers
+    # -----------------------------
+    def save_chart_config(self, name: str, config: dict) -> int:
+        """Save a named chart configuration (JSON). Returns the row id."""
+        import json
+        with self._connect() as conn:
+            cur = conn.cursor()
+            now = datetime.utcnow().isoformat()
+            try:
+                cur.execute("INSERT OR REPLACE INTO chart_configs (name, config, created_at) VALUES (?, ?, ?)", (name, json.dumps(config), now))
+                conn.commit()
+                # fetch id
+                cur.execute("SELECT id FROM chart_configs WHERE name = ?", (name,))
+                row = cur.fetchone()
+                return row[0] if row else None
+            except Exception:
+                conn.rollback()
+                raise
+
+    def get_chart_config(self, name: str) -> Optional[dict]:
+        import json
+        cur = self.conn.cursor()
+        cur.execute("SELECT config, created_at FROM chart_configs WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        try:
+            cfg = json.loads(row[0]) if row[0] else {}
+        except Exception:
+            cfg = {}
+        return {"name": name, "config": cfg, "created_at": row[1]}
+
+    def list_chart_configs(self) -> list:
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, name, created_at FROM chart_configs ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        return [{"id": r[0], "name": r[1], "created_at": r[2]} for r in rows]
+
+    def remove_chart_config(self, name: str) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM chart_configs WHERE name = ?", (name,))
+        self.conn.commit()
+        return cur.rowcount > 0
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(f"UPDATE positions SET {', '.join(set_parts)} WHERE id = ?", tuple(params))

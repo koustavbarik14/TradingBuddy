@@ -1,0 +1,199 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <h1>Market Scanner</h1>
+  <p>Displays final score bar chart and heatmap. Click a ticker to view detailed chart below.</p>
+
+  <div id="scanner-controls" class="card">
+    <div class="card-row">
+      <div style="flex:1">
+        <label><strong>Symbols:</strong></label>
+        <input id="symbols" class="input" value="{{ ','.join(DEFAULT_UNIVERSE[:30]) }}">
+      </div>
+      <div style="margin-left:12px">
+        <button id="runBtn" class="btn">Run Scanner</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="charts" class="grid">
+    <div id="bar" class="chart-card"></div>
+    <div id="heatmap" class="chart-card"></div>
+    <div id="ticker-wrap" class="chart-card">
+      <h3 id="ticker-title">Selected ticker chart</h3>
+      <div id="ticker-chart" style="width:100%;height:420px;display:flex;align-items:center;justify-content:center;">
+        <span class="muted">Click a ticker on the left to render a server-side chart image.</span>
+      </div>
+      <div id="chart-debug" style="font-size:12px;color:#666;margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- Try to load TradeX-chart (vanilla JS) from jsDelivr. If it fails, we'll fall back to server-side PNG rendering. -->
+  <script>
+    (function(){
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/gh/tradex-app/TradeX-chart@latest/dist/tradex-chart.min.js';
+      s.crossOrigin = 'anonymous';
+      s.onload = () => console.info('TradeX-chart loaded');
+      s.onerror = () => console.warn('TradeX-chart failed to load; will use server-side PNG fallback');
+      document.head.appendChild(s);
+    })();
+  </script>
+
+  <!-- Load Lightweight-Charts as a reliable client-side renderer fallback -->
+  <!-- TradingView widget will be used for ticker details -->
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+  <script>
+    // API base explicitly points at the Flask backend to avoid dev-proxy confusion
+    const API_BASE = 'http://127.0.0.1:5000';
+
+    async function fetchScores(symbols) {
+      const qs = new URLSearchParams({ symbols: symbols.join(',') });
+      const res = await fetch(`${API_BASE}/api/scanner?${qs.toString()}`);
+      if (!res.ok) throw new Error('Failed to fetch scanner');
+      return await res.json();
+    }
+
+    async function fetchOHLC(symbol) {
+      // Use query-based OHLC endpoint for consistency with other pages
+      const res = await fetch(`${API_BASE}/api/ohlc?symbol=${encodeURIComponent(symbol)}&days=365`);
+      if (!res.ok) throw new Error('Failed to fetch ohlc for ' + symbol);
+      return await res.json();
+    }
+
+    function drawList(scores) {
+      // simple list + heat-like grid for templates (no Plotly)
+      const bar = document.getElementById('bar');
+      const heat = document.getElementById('heatmap');
+      bar.innerHTML = '';
+      heat.innerHTML = '';
+
+      const ul = document.createElement('ul');
+      ul.style.listStyle = 'none';
+      ul.style.padding = '0';
+      for (const s of scores) {
+        const li = document.createElement('li');
+        li.style.display = 'flex';
+        li.style.justifyContent = 'space-between';
+        li.style.padding = '6px 8px';
+        li.style.cursor = 'pointer';
+        li.style.borderBottom = '1px solid #eee';
+        li.addEventListener('click', ()=> showTickerChart(s.symbol));
+        const lbl = document.createElement('span');
+        lbl.textContent = s.symbol;
+        const badge = document.createElement('span');
+        badge.textContent = (Math.round((s.final_score||0)*100)/100).toFixed(2);
+        badge.style.background = (s.final_score>0)? '#0f9d58' : '#db4437';
+        badge.style.color = '#fff';
+        badge.style.padding = '2px 6px';
+        badge.style.borderRadius = '4px';
+        li.appendChild(lbl);
+        li.appendChild(badge);
+        ul.appendChild(li);
+      }
+      bar.appendChild(ul);
+
+      // heatmap-ish grid: simple tiles
+      const grid = document.createElement('div');
+      grid.style.display = 'grid';
+      grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(80px, 1fr))';
+      grid.style.gap = '6px';
+      for (const s of scores) {
+        const tile = document.createElement('div');
+        tile.style.padding = '8px';
+        tile.style.borderRadius = '6px';
+        tile.style.textAlign = 'center';
+        tile.style.cursor = 'pointer';
+        tile.style.fontWeight = '600';
+        tile.style.fontSize = '13px';
+        const v = s.final_score || 0;
+        
+        // Simple color logic: green for positive, red for negative, amber for 0
+        let bgColor, textColor;
+        if (v > 0) {
+          bgColor = '#10b981';  // green
+          textColor = '#fff';
+        } else if (v < 0) {
+          bgColor = '#ef4444';  // red
+          textColor = '#fff';
+        } else {
+          bgColor = '#f59e0b';  // amber
+          textColor = '#fff';
+        }
+        
+        tile.style.background = bgColor;
+        tile.style.color = textColor;
+        tile.style.border = '1px solid rgba(255,255,255,0.1)';
+        tile.style.transition = 'all 0.2s ease';
+        tile.addEventListener('click', ()=> showTickerChart(s.symbol));
+        tile.addEventListener('mouseover', ()=> { tile.style.transform = 'scale(1.05)'; tile.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)'; });
+        tile.addEventListener('mouseout', ()=> { tile.style.transform = 'scale(1)'; tile.style.boxShadow = 'none'; });
+        const sym = document.createElement('div');
+        sym.textContent = s.symbol;
+        sym.style.fontWeight = '700';
+        sym.style.marginBottom = '2px';
+        const sc = document.createElement('div');
+        sc.textContent = (Math.round(v*100)/100).toFixed(2);
+        sc.style.fontSize = '12px';
+        sc.style.opacity = '0.9';
+        tile.appendChild(sym);
+        tile.appendChild(sc);
+        grid.appendChild(tile);
+      }
+      heat.appendChild(grid);
+    }
+
+    async function showTickerChart(symbol) {
+      try {
+        document.getElementById('ticker-title').innerText = symbol + ' — Price';
+        const chartDiv = document.getElementById('ticker-chart');
+        
+        // Use TradingView widget as primary chart renderer
+        chartDiv.innerHTML = '<div id="tv_ticker_container" style="width:100%;height:420px;"></div>';
+        const tvSymbol = 'NASDAQ:' + symbol;
+        try {
+          new TradingView.widget({
+            width: '100%',
+            height: 420,
+            symbol: tvSymbol,
+            interval: 'D',
+            timezone: 'Etc/UTC',
+            theme: 'Dark',
+            style: '1',
+            locale: 'en',
+            toolbar_bg: '#1a1f2e',
+            hide_top_toolbar: false,
+            allow_symbol_change: true,
+            container_id: 'tv_ticker_container'
+          });
+        } catch (e) {
+          console.error('TradingView widget failed', e);
+          chartDiv.innerHTML = '<div class="muted">Unable to load chart. Please try again.</div>';
+        }
+      } catch(e) { 
+        console.error('showTickerChart error', e); 
+        document.getElementById('ticker-chart').innerText = 'Error loading chart'; 
+      }
+    }
+
+    document.getElementById('runBtn').addEventListener('click', async ()=>{
+      try{
+        const raw = document.getElementById('symbols').value || '';
+        const symbols = raw.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
+        const scores = await fetchScores(symbols);
+        scores.sort((a,b)=> b.final_score - a.final_score);
+  drawList(scores);
+        // show first ticker by default
+        if (scores.length) showTickerChart(scores[0].symbol);
+      }catch(e){
+        console.error(e);
+        document.getElementById('bar').innerText = 'Error loading scanner';
+      }
+    });
+
+    // auto-run initial
+    document.getElementById('runBtn').click();
+  </script>
+
+{% endblock %}

@@ -2,8 +2,15 @@ flask
 apscheduler
 pandas
 numpy
+scipy
 yfinance
-plotly
 requests
 waitress
 pytest
+pytest-cov
+pytest-mock
+finplot
+PyQt5
+mplfinance
+plotly
+streamlit

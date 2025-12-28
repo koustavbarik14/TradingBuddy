@@ -16,11 +16,9 @@
 
   <div class="row">
     <div class="col-8">
-      {% if chart_div %}
-        <div id="chart">{{ chart_div | safe }}</div>
-      {% else %}
-        <p>No data to show for {{ symbol }}.</p>
-      {% endif %}
+      <div id="chart" style="width:100%;height:420px;">
+        <div id="chart-loading" style="padding:12px;color:#666;">Loading chart for {{ symbol }}…</div>
+      </div>
     </div>
     <div class="col-4 info-panel">
       <h3>{{ symbol }}</h3>
@@ -35,5 +33,39 @@
       {% endif %}
     </div>
   </div>
+
+  <!-- TradingView widget for homepage interactive chart -->
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script>
+    (async function(){
+      const symbol = '{{ symbol }}';
+      if (!symbol) return;
+      const chartDiv = document.getElementById('chart');
+      
+      // Use TradingView widget as primary chart renderer
+      chartDiv.innerHTML = '<div id="tv_home_container" style="width:100%;height:420px;"></div>';
+      const tvSymbol = 'NASDAQ:' + symbol;
+      try {
+        new TradingView.widget({
+          width: '100%',
+          height: 420,
+          symbol: tvSymbol,
+          interval: 'D',
+          timezone: 'Etc/UTC',
+          theme: 'Dark',
+          style: '1',
+          locale: 'en',
+          toolbar_bg: '#1a1f2e',
+          hide_top_toolbar: false,
+          allow_symbol_change: true,
+          container_id: 'tv_home_container'
+        });
+        console.log('TradingView widget loaded for ' + symbol);
+      } catch (e) {
+        console.error('TradingView widget failed to load', e);
+        chartDiv.innerHTML = '<div style="padding:20px;color:#b0b8c1;">Chart unavailable</div>';
+      }
+    })();
+  </script>
 
 {% endblock %}

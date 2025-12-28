@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Lightweight Charts Integration</title>
+    <style>
+        body {
+            background: #0f172a;
+            color: #e5e7eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            padding: 40px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        #chart-container {
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            min-height: 500px;
+        }
+        .status {
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .success { background: #065f46; color: #10b981; }
+        .error { background: #7f1d1d; color: #ef4444; }
+        .info { background: #1e3a8a; color: #60a5fa; }
+        h1 { color: #60a5fa; }
+        .badge { 
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📈 TradingView Lightweight Charts Test <span class="badge">Production Ready</span></h1>
+        <p>Test the breakout chart API with TradingView Lightweight Charts - Fast, lightweight, and designed for financial data</p>
+        
+        <div>
+            <button onclick="testChart('AAPL')">📱 Test AAPL</button>
+            <button onclick="testChart('MSFT')">💻 Test MSFT</button>
+            <button onclick="testChart('GOOG')">🔍 Test GOOG</button>
+            <button onclick="testChart('TSLA')">🚗 Test TSLA</button>
+            <button onclick="testChart('NVDA')">🎮 Test NVDA</button>
+            <button onclick="testChart('META')">📘 Test META</button>
+        </div>
+        
+        <div id="status"></div>
+        <div id="chart-container"></div>
+    </div>
+    
+    <script>
+        const API_BASE = 'http://127.0.0.1:5000';
+        
+        function log(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            const timestamp = new Date().toLocaleTimeString();
+            statusDiv.innerHTML = `<div class="status ${type}">[${timestamp}] ${message}</div>`;
+            console.log(`[${type.toUpperCase()}]`, message);
+        }
+        
+        async function testChart(symbol) {
+            log(`🔄 Loading ${symbol} chart with Lightweight Charts...`, 'info');
+            const chartContainer = document.getElementById('chart-container');
+            
+            chartContainer.innerHTML = '<div style="text-align:center;padding:60px;color:#60a5fa;font-size:18px;">⏳ Loading chart...</div>';
+            
+            try {
+                log(`📡 Fetching: ${API_BASE}/api/breakout_chart/${symbol}`, 'info');
+                const res = await fetch(`${API_BASE}/api/breakout_chart/${symbol}`);
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                
+                const data = await res.json();
+                log(`✅ Response received. Chart HTML: ${data.html.length} chars`, 'success');
+                
+                if (data.error) {
+                    log(`❌ API Error: ${data.error}`, 'error');
+                    chartContainer.innerHTML = `<div style="color:#ef4444;padding:40px;text-align:center;font-size:16px;">❌ ${data.error}</div>`;
+                    return;
+                }
+                
+                // Inject Lightweight Charts HTML
+                log(`🎨 Rendering TradingView Lightweight Chart...`, 'info');
+                chartContainer.innerHTML = data.html;
+                
+                log(`🎉 Chart loaded successfully for ${symbol}! Pattern: ${data.pattern.pattern_type}`, 'success');
+            } catch (error) {
+                log(`❌ Error: ${error.message}`, 'error');
+                chartContainer.innerHTML = `<div style="color:#ef4444;padding:40px;text-align:center;font-size:16px;">❌ Failed to load chart: ${error.message}</div>`;
+                console.error('Full error:', error);
+            }
+        }
+        
+        // Auto-load AAPL on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            log('✨ Page loaded. Click a button to test TradingView Lightweight Charts rendering.', 'info');
+            setTimeout(() => testChart('AAPL'), 500);
+        });
+    </script>
+</body>
+</html>

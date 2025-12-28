@@ -1,7 +1,7 @@
 import os
 from math import ceil
 from typing import Optional
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from apscheduler.schedulers.background import BackgroundScheduler
 from threading import Thread
 import math
@@ -11,8 +11,9 @@ import pandas as pd
 from tradingbuddy.core import DataIngestion
 from tradingbuddy.features.patterns import PatternDetection
 from tradingbuddy.features.technical import add_indicators
-from plotly import graph_objs as go
-from plotly.offline import plot
+from tradingbuddy.features.scanner import compute_scores_for_universe
+from tradingbuddy.features.ml_breakouts import detect_breakouts_for_universe, BreakoutPattern
+import json
 
 
 def create_app(db_path: Optional[str] = None):
@@ -21,6 +22,21 @@ def create_app(db_path: Optional[str] = None):
     static_dir = os.path.join(package_dir, 'static')
 
     app = Flask(__name__, template_folder=templates_dir, static_folder=static_dir)
+
+    # ensure the logger prints INFO+ messages to console so we can see incoming API calls
+    try:
+        import logging
+        app.logger.setLevel(logging.INFO)
+    except Exception:
+        pass
+
+    @app.before_request
+    def _log_incoming_request():
+        # Log method and path for every incoming request to help surface clicks/requests from the frontend
+        try:
+            app.logger.info(f"Incoming request: {request.method} {request.path} from {request.remote_addr}")
+        except Exception:
+            pass
 
     # Load .env from project root if present (simple parser) so backend can pick up keys
     try:
@@ -48,6 +64,20 @@ def create_app(db_path: Optional[str] = None):
     # application singletons
     app.di = DataIngestion(db_path=DATABASE)
     app.pd = PatternDetection()
+    
+    # Add dummy trades for demo purposes if none exist
+    try:
+        existing_positions = app.di.list_positions()
+        if not existing_positions or len(existing_positions) == 0:
+            # Add 5 sample trades
+            app.di.add_position('AAPL', '2024-11-15', 185.50, 10, 'closed', 'Breakout from Darvas Box - nice momentum')
+            app.di.add_position('TSLA', '2024-12-01', 245.30, 5, 'open', 'Head & Shoulders pattern forming')
+            app.di.add_position('NVDA', '2024-11-20', 495.75, 8, 'closed', 'AI rally continuation - sold at resistance')
+            app.di.add_position('MSFT', '2024-12-10', 375.20, 12, 'open', 'Cup & Handle breakout - strong volume')
+            app.di.add_position('META', '2024-12-05', 340.00, 6, 'closed', 'Channel breakout - took profits at 360')
+            app.logger.info('Added 5 demo trades')
+    except Exception as e:
+        app.logger.warning('Could not add demo trades: %s', e)
 
     # Setup a background scheduler to run daily updates (APScheduler)
     scheduler = BackgroundScheduler()
@@ -70,6 +100,20 @@ def create_app(db_path: Optional[str] = None):
     except Exception:
         # ignore scheduler start errors (may already be started in some environments)
         app.logger.exception('Failed to start APScheduler')
+
+    # If a built React frontend is present, serve static files from it (single-server mode)
+    try:
+        build_dir = os.path.join(project_root, 'frontend', 'dist')
+        if os.path.exists(build_dir):
+            @app.route('/<path:filename>')
+            def _serve_frontend_file(filename):
+                full = os.path.join(build_dir, filename)
+                if os.path.exists(full):
+                    return send_from_directory(build_dir, filename)
+                # fallback to index for SPA routes
+                return send_from_directory(build_dir, 'index.html')
+    except Exception:
+        pass
 
     def safe_float(x):
         try:
@@ -95,160 +139,116 @@ def create_app(db_path: Optional[str] = None):
     }
 
     # Default universe: common liquid US tickers (starter list)
+    # Will be dynamically enhanced with yfinance data validation
     DEFAULT_UNIVERSE = [
         'AAPL','MSFT','GOOG','AMZN','TSLA','NVDA','META','NFLX','INTC','AMD',
         'CSCO','ORCL','CRM','ADBE','IBM','QCOM','TXN','AVGO','AMAT','PYPL',
-        'BABA','WMT','PG','KO','PEP','MCD','SBUX','DIS','BAC','JPM',
+        'WMT','PG','KO','PEP','MCD','SBUX','DIS','BAC','JPM',
         'V','MA','AXP','C','GS','MS','BK','UBER','LYFT','SNAP','TWTR','SQ',
-        'SHOP','ZM','DOCU','SPOT','ROKU','F','GM','NIO','PLTR','SNOW',
-        'SQ','CRM','TSM','SAP','BMY','PFE','JNJ','MRK','ABBV','GILD'
+        'SHOP','ZM','DOCU','SPOT','ROKU','F','GM','PLTR','SNOW'
     ]
+    
+    def _validate_symbol(symbol):
+        """Validate that a symbol is valid (can fetch data from yfinance)."""
+        try:
+            # Try to fetch minimal data for the symbol
+            df = app.di.fetch_price_data(symbol, period='5d')
+            return df is not None and not df.empty
+        except Exception:
+            return False
+    
+    def _get_dynamic_universe(limit=50):
+        """Get validated symbols from DEFAULT_UNIVERSE, removing any invalid ones."""
+        import yfinance as yf
+        valid_symbols = []
+        for symbol in DEFAULT_UNIVERSE[:limit]:
+            try:
+                # Quick validation: fetch 1 day of data
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period='1d')
+                if not hist.empty:
+                    valid_symbols.append(symbol)
+            except Exception:
+                # Skip invalid symbols silently
+                pass
+        return valid_symbols if valid_symbols else DEFAULT_UNIVERSE[:20]  # fallback to first 20 if all fail
 
 
     @app.route('/')
     def index():
-        symbol = request.args.get('symbol', 'AAPL').upper()
-        period_key = request.args.get('period', '1y')
-        period = PERIOD_MAP.get(period_key, '1y')
-
-        # Try get from DB first (use a reasonable days mapping)
-        days_map = {
-            '1d': 1,
-            '1w': 7,
-            '1m': 30,
-            '6m': 180,
-            '1y': 365,
-            '3y': 365 * 3,
-            '5y': 365 * 5,
-            'max': 365 * 10,
-        }
-        days = days_map.get(period_key, 365)
-
-        df = app.di.get_price_data(symbol, days=days)
-        if df is None or df.empty:
-            # fetch and save
-            price_df = app.di.fetch_price_data(symbol, period=period)
-            if price_df is not None and not price_df.empty:
-                app.di.save_price_data(price_df)
-                df = app.di.get_price_data(symbol, days=days)
-
-        chart_div = ""
-        info = {}
-        if df is not None and not df.empty:
-            # Ensure the required columns exist
-            if {'date', 'open', 'high', 'low', 'close'}.issubset(set(df.columns)):
-                fig = go.Figure(
-                    data=[
-                        go.Candlestick(
-                            x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close']
-                        )
-                    ]
-                )
-                fig.update_layout(title=f"{symbol} price ({period_key})")
-                chart_div = plot(fig, output_type='div', include_plotlyjs=False)
-
-                # compute small info panel
-                try:
-                    last_close = float(df['close'].iloc[-1])
-                    prev_close = float(df['close'].iloc[-2]) if len(df) > 1 else None
-                    pct = ((last_close - prev_close) / prev_close * 100) if prev_close else None
-                    volume = int(df['volume'].iloc[-1]) if 'volume' in df.columns else None
-                    df_ind = add_indicators(df.copy())
-                    rsi = float(df_ind['rsi'].iloc[-1]) if 'rsi' in df_ind.columns else None
-                    sma20 = df_ind['sma_20'].iloc[-1] if 'sma_20' in df_ind.columns else None
-                    sma50 = df_ind['sma_50'].iloc[-1] if 'sma_50' in df_ind.columns else None
-                    if sma20 is not None and sma50 is not None:
-                        sma_cross = 'above' if sma20 > sma50 else 'below'
-                    else:
-                        sma_cross = None
-                    info = {
-                        'last_close': last_close,
-                        'pct_change': pct,
-                        'volume': volume,
-                        'rsi': rsi,
-                        'sma_cross': sma_cross,
-                    }
-                except Exception:
-                    info = {}
-
-        # periods list for template
-        periods = list(PERIOD_MAP.keys())
-
-        return render_template('main.html', chart_div=chart_div, symbol=symbol, period_key=period_key, periods=periods, info=info)
-
+        """Main landing page - show breakout patterns"""
+        return breakouts()
 
     @app.route('/breakouts')
     def breakouts():
-        lookback = int(request.args.get('lookback', 30))
-        volume_multiplier = float(request.args.get('volume_multiplier', 1.5))
-        page = int(request.args.get('page', 1))
-        page_size = int(request.args.get('page_size', 25))
-        sort_by = request.args.get('sort_by', 'symbol')
-        sort_dir = request.args.get('sort_dir', 'asc')
+        """Display AI/ML-detected breakout patterns"""
+        limit = int(request.args.get('limit', 10))
+        symbols_param = request.args.get('symbols')
+        
+        if symbols_param:
+            symbols = [s.strip().upper() for s in symbols_param.split(',') if s.strip()]
+            symbols = [s for s in symbols if ':' not in s and s.isalpha()]
+        else:
+            symbols = _get_dynamic_universe(50)
 
-        symbols = app.di.list_symbols()
-        results = []
-        for s in symbols:
-            df = app.di.get_price_data(s, days=lookback)
-            if df is None or df.empty:
-                continue
-
-            # compute indicators for metrics
-            df_ind = add_indicators(df.copy())
-            last_close = float(df_ind['close'].iloc[-1])
-            prev_close = float(df_ind['close'].iloc[-2]) if len(df_ind) > 1 else None
-            pct = ((last_close - prev_close) / prev_close * 100) if prev_close else None
-            rsi = float(df_ind['rsi'].iloc[-1]) if 'rsi' in df_ind.columns else None
-            sma20 = df_ind['sma_20'].iloc[-1] if 'sma_20' in df_ind.columns else None
-            sma50 = df_ind['sma_50'].iloc[-1] if 'sma_50' in df_ind.columns else None
-            sma_cross = None
-            if sma20 is not None and sma50 is not None:
-                sma_cross = 'above' if sma20 > sma50 else 'below'
-
-            # Use the feature PatternDetection
-            res = app.pd.detect_breakout(df, lookback=lookback, volume_multiplier=volume_multiplier)
-            if isinstance(res, dict):
-                rec = {'symbol': s, **res}
-            else:
-                rec = {'symbol': s, 'result': res}
-
-            # attach metrics
-            rec['pct_change'] = round(pct, 2) if pct is not None else None
-            rec['rsi'] = round(rsi, 2) if rsi is not None else None
-            rec['sma_cross'] = sma_cross
-
-            results.append(rec)
-
-        # Build metrics columns if missing
-        for r in results:
-            r.setdefault('result', 'none')
-            r.setdefault('level', None)
-            r.setdefault('volume_ratio', None)
-
-        # Sorting
-        reverse = sort_dir == 'desc'
-        results.sort(key=lambda x: (x.get(sort_by) is None, x.get(sort_by)), reverse=reverse)
-
-        # Pagination
-        total = len(results)
-        total_pages = max(1, ceil(total / page_size))
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_items = results[start:end]
-
+        # Data loader for ML detector
+        def data_loader(sym):
+            try:
+                df = app.di.get_price_data(sym, days=365)
+                if df is None or df.empty:
+                    fetched = app.di.fetch_price_data(sym, period='1y')
+                    if fetched is not None and not fetched.empty:
+                        try:
+                            app.di.save_price_data(fetched)
+                        except Exception:
+                            pass
+                        df = app.di.get_price_data(sym, days=365)
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                df = df.copy()
+                df.columns = [c.lower() for c in df.columns]
+                return df
+            except Exception:
+                return pd.DataFrame()
+        
+        # Detect breakouts using ML
+        items = []
+        try:
+            patterns = detect_breakouts_for_universe(data_loader, symbols, limit=limit, timeframe='daily')
+            items = [
+                {
+                    'symbol': p.symbol,
+                    'pattern': p.pattern_type.replace('_', ' ').title(),
+                    'status': 'forming',  # Default status for initial render
+                    'confidence': round(p.confidence * 100, 1),  # Convert to percentage
+                    'entry_price': round(p.entry_price, 2),
+                    'breakout_date': p.breakout_date,
+                    'description': p.description,
+                    'support': round(p.support_level, 2) if p.support_level else 'N/A',
+                    'resistance': round(p.resistance_level, 2) if p.resistance_level else 'N/A',
+                }
+                for p in patterns
+            ]
+        except Exception as e:
+            app.logger.exception('Breakout detection error: %s', e)
+            items = []
+        
         return render_template(
             'breakouts.html',
-            items=page_items,
-            page=page,
-            page_size=page_size,
-            total=total,
-            total_pages=total_pages,
-            sort_by=sort_by,
-            sort_dir=sort_dir,
-            lookback=lookback,
-            volume_multiplier=volume_multiplier,
+            items=items,
+            total=len(items),
+            limit=limit
         )
 
+    @app.route('/test-plotly')
+    def test_plotly():
+        """Test page for Plotly chart integration"""
+        return render_template('test_plotly.html')
+
+    @app.route('/test-simple')
+    def test_simple():
+        """Very simple test route"""
+        return "Hello from Flask!"
 
     # Simple API endpoint for screening — returns JSON ranked results
     @app.route('/api/screen')
@@ -399,6 +399,375 @@ def create_app(db_path: Optional[str] = None):
         return jsonify({'count': len(results), 'results': results[:limit]})
 
 
+    @app.route('/scanner')
+    def scanner():
+        # render scanner UI; use validated universe that filters invalid symbols
+        validated_universe = _get_dynamic_universe(50)
+        return render_template('scanner.html', DEFAULT_UNIVERSE=validated_universe)
+
+    @app.route('/trades')
+    def trades():
+        # render trades management UI
+        return render_template('trades.html')
+
+    @app.route('/api/scanner')
+    def api_scanner():
+        # returns JSON list of scoring results using the notebook logic
+        # Filters invalid symbols automatically (e.g., NASDAQ:BABA, invalid tickers)
+        symbols_param = request.args.get('symbols')
+        if symbols_param:
+            symbols = [s.strip().upper() for s in symbols_param.split(',') if s.strip()]
+            # Filter to remove invalid symbols (symbols with ':' or other invalid formats)
+            symbols = [s for s in symbols if ':' not in s and s.isalpha()]
+        else:
+            symbols = _get_dynamic_universe(30)
+
+        # data loader closure: attempts to read local DB, otherwise fetch from source
+        def data_loader(sym):
+            try:
+                df = app.di.get_price_data(sym, days=365)
+                if df is None or df.empty:
+                    fetched = app.di.fetch_price_data(sym, period='1y')
+                    if fetched is not None and not fetched.empty:
+                        try:
+                            app.di.save_price_data(fetched)
+                        except Exception:
+                            pass
+                        df = app.di.get_price_data(sym, days=365)
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                df = df.copy()
+                df.columns = [c.lower() for c in df.columns]
+                return df
+            except Exception:
+                return pd.DataFrame()
+
+        # Filter symbols to only those that have data available
+        valid_symbols = []
+        for sym in symbols:
+            try:
+                data = data_loader(sym)
+                if not data.empty:
+                    valid_symbols.append(sym)
+            except Exception:
+                pass
+        
+        # Use valid symbols, or fallback to default if none found
+        symbols_to_score = valid_symbols if valid_symbols else _get_dynamic_universe(15)
+        
+        df_scores = compute_scores_for_universe(data_loader, symbols_to_score)
+        # sanitize and return (convert numpy types to native python)
+        out = df_scores.fillna(0).to_dict(orient='records')
+        try:
+            safe = json.loads(json.dumps(out, default=lambda x: (x.item() if hasattr(x, 'item') else x)))
+        except Exception:
+            safe = out
+        return jsonify(safe)
+
+    @app.route('/api/ml_breakouts')
+    def api_ml_breakouts():
+        """ML-powered breakout detection endpoint.
+        
+        Returns list of detected breakout patterns sorted by confidence.
+        Query params:
+            - symbols: comma-separated symbol list (optional, defaults to universe)
+            - limit: max patterns to return (default: 10)
+            - timeframe: 'daily', 'weekly', or 'monthly' (default: 'daily')
+        """
+        symbols_param = request.args.get('symbols')
+        limit = int(request.args.get('limit', 10))
+        timeframe = request.args.get('timeframe', 'daily').lower()
+        
+        # Map timeframe to days
+        timeframe_days = {
+            'daily': 365,
+            'weekly': 365 * 4,
+            'monthly': 365 * 2
+        }
+        days_to_fetch = timeframe_days.get(timeframe, 365)
+        
+        if symbols_param:
+            symbols = [s.strip().upper() for s in symbols_param.split(',') if s.strip()]
+            # Filter invalid symbols
+            symbols = [s for s in symbols if ':' not in s and s.isalpha()]
+        else:
+            symbols = _get_dynamic_universe(50)
+        
+        # Data loader for ML detector - fetch more data based on timeframe
+        def data_loader(sym):
+            try:
+                df = app.di.get_price_data(sym, days=days_to_fetch)
+                if df is None or df.empty:
+                    fetched = app.di.fetch_price_data(sym, period='2y')
+                    if fetched is not None and not fetched.empty:
+                        try:
+                            app.di.save_price_data(fetched)
+                        except Exception:
+                            pass
+                        df = app.di.get_price_data(sym, days=days_to_fetch)
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                df = df.copy()
+                df.columns = [c.lower() for c in df.columns]
+                
+                # Drop symbol column before resampling (it's not numeric and causes issues)
+                if 'symbol' in df.columns:
+                    df = df.drop('symbol', axis=1)
+                
+                # CRITICAL: Set date column as index for resampling to work
+                # resample() requires DatetimeIndex, not integer index
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.set_index('date')
+                
+                # Resample data for weekly/monthly if needed
+                if timeframe == 'weekly':
+                    df = df.resample('W').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                elif timeframe == 'monthly':
+                    df = df.resample('M').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                
+                return df
+            except Exception:
+                return pd.DataFrame()
+        
+        # Detect breakouts (use pre-breakout mode by default)
+        try:
+            patterns = detect_breakouts_for_universe(data_loader, symbols, limit=limit, timeframe=timeframe, pre_breakout_mode=True)
+            
+            # Get current prices for status calculation
+            current_prices = {}
+            for sym in symbols:
+                df = data_loader(sym)
+                if not df.empty:
+                    current_prices[sym] = float(df['close'].iloc[-1])
+            
+            # Convert to JSON-serializable format
+            out = []
+            for p in patterns:
+                current_price = current_prices.get(p.symbol, p.entry_price)
+                
+                # Determine status based on entry_price vs current_price
+                # For buy signals: confirmed if entry_price < current_price (already moved up)
+                # For buy signals: forming if entry_price >= current_price (waiting to enter)
+                if p.entry_price < current_price:
+                    status = 'confirmed'
+                else:
+                    status = 'forming'
+                
+                out.append({
+                    'symbol': p.symbol,
+                    'pattern_type': p.pattern_type,
+                    'confidence': round(float(p.confidence) * 100, 1),  # Convert to percentage
+                    'entry_price': round(float(p.entry_price), 2),
+                    'current_price': round(current_price, 2),
+                    'breakout_date': p.breakout_date,
+                    'description': p.description,
+                    'support_level': round(float(p.support_level), 2) if p.support_level else None,
+                    'resistance_level': round(float(p.resistance_level), 2) if p.resistance_level else None,
+                    'status': status
+                })
+            
+            # Consolidate multiple patterns per stock
+            consolidated = {}
+            for pattern in out:
+                sym = pattern['symbol']
+                if sym in consolidated:
+                    # Combine pattern types
+                    existing = consolidated[sym]
+                    existing['pattern_type'] += ', ' + pattern['pattern_type']
+                    # Keep highest confidence
+                    if pattern['confidence'] > existing['confidence']:
+                        existing['confidence'] = pattern['confidence']
+                    # Combine descriptions
+                    if pattern['description'] not in existing['description']:
+                        existing['description'] += '; ' + pattern['description']
+                    # Use most optimistic status
+                    if pattern['status'] == 'confirmed' or existing['status'] == 'confirmed':
+                        existing['status'] = 'confirmed'
+                else:
+                    consolidated[sym] = pattern
+            
+            # Convert back to list and sort by confidence
+            result = list(consolidated.values())
+            result.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            return jsonify(result)
+        except Exception as e:
+            app.logger.exception('ML breakout detection failed: %s', e)
+            return jsonify({'error': 'detection_failed', 'detail': str(e)}), 500
+
+    @app.route('/api/stock_info/<symbol>')
+    def api_stock_info(symbol: str):
+        """Get comprehensive stock information including OHLC, RSI, fundamentals, and analyst recommendations"""
+        try:
+            from tradingbuddy.features.stock_info import get_stock_info
+            
+            info = get_stock_info(symbol.upper(), data_ingestion=app.di)
+            return jsonify(info)
+        except Exception as e:
+            app.logger.exception('Stock info fetch failed: %s', e)
+            return jsonify({
+                'error': 'fetch_failed',
+                'detail': str(e),
+                'symbol': symbol.upper(),
+                'exchange': 'NASDAQ'
+            }), 500
+
+    @app.route('/api/breakout_chart/<symbol>')
+    def api_breakout_chart(symbol: str):
+        """Generate static candlestick chart with breakout pattern annotations"""
+        try:
+            from tradingbuddy.visualization.mplfinance_charts import create_pattern_chart
+            from tradingbuddy.features.ml_breakouts import detect_breakouts_for_universe
+            
+            # Get timeframe from query params
+            timeframe = request.args.get('timeframe', 'daily')
+            
+            # Adjust days based on timeframe to get enough candles
+            if timeframe == 'monthly':
+                days = 730  # 2 years for monthly charts
+            elif timeframe == 'weekly':
+                days = 365  # 1 year for weekly charts
+            else:
+                days = 90   # 90 days for daily charts
+            
+            # Get pattern data for this symbol
+            def data_loader(sym):
+                df = app.di.get_price_data(sym, days=days)
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                df = df.copy()
+                df.columns = [c.lower() for c in df.columns]
+                if 'symbol' in df.columns:
+                    df = df.drop('symbol', axis=1)
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.set_index('date')
+                
+                # Resample for weekly/monthly
+                if timeframe == 'weekly':
+                    df = df.resample('W').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                elif timeframe == 'monthly':
+                    df = df.resample('M').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                
+                return df
+            
+            patterns = detect_breakouts_for_universe(data_loader, [symbol.upper()], limit=1, timeframe=timeframe)
+            
+            if not patterns:
+                return jsonify({'error': 'No breakout pattern found for this symbol'}), 404
+            
+            pattern = patterns[0]
+            price_df = data_loader(symbol.upper())
+            
+            if price_df.empty:
+                return jsonify({'error': 'No price data available'}), 404
+            
+            # Create pattern data dict
+            pattern_data = {
+                'pattern_type': pattern.pattern_type,
+                'resistance_level': pattern.resistance_level,
+                'support_level': pattern.support_level,
+                'entry_price': pattern.entry_price,
+                'breakout_date': pattern.breakout_date,
+                'description': pattern.description,
+                'timeframe': timeframe  # Add timeframe to pattern data
+            }
+            
+            # Generate static chart image (base64 encoded)
+            image_data = create_pattern_chart(symbol.upper(), price_df, pattern_data)
+            
+            if not image_data:
+                return jsonify({'error': 'Chart generation failed'}), 500
+            
+            return jsonify({'image': image_data, 'pattern': pattern_data})
+        
+        except Exception as e:
+            app.logger.exception('Breakout chart generation failed: %s', e)
+            return jsonify({'error': 'chart_generation_failed', 'detail': str(e)}), 500
+
+    @app.route('/api/ohlc/<symbol>')
+    def api_ohlc_symbol(symbol: str):
+        # return OHLC series for a single ticker as JSON
+        period_key = request.args.get('period', '1y')
+        days_map = {
+            '1d': 1,
+            '1w': 7,
+            '1m': 30,
+            '6m': 180,
+            '1y': 365,
+            '3y': 365*3,
+            '5y': 365*5,
+            'max': 365*10
+        }
+        days = days_map.get(period_key, 365)
+        df = app.di.get_price_data(symbol.upper(), days=days)
+        if df is None or df.empty:
+            fetched = app.di.fetch_price_data(symbol.upper(), period='1y')
+            if fetched is not None and not fetched.empty:
+                try:
+                    app.di.save_price_data(fetched)
+                except Exception:
+                    pass
+                df = app.di.get_price_data(symbol.upper(), days=days)
+
+        if df is None or df.empty:
+            return jsonify([])
+
+        # normalize columns and return list of dicts
+        df = df.copy()
+        # prefer a 'date' column, otherwise use index
+        if 'date' not in df.columns:
+            try:
+                df = df.reset_index()
+            except Exception:
+                pass
+        df.columns = [c.lower() for c in df.columns]
+        out_cols = []
+        for _, row in df.iterrows():
+            rec = {}
+            # date
+            if 'date' in df.columns:
+                try:
+                    rec['date'] = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+                except Exception:
+                    rec['date'] = str(row['date'])
+            else:
+                rec['date'] = ''
+            rec['open'] = float(row.get('open', 0)) if not pd.isna(row.get('open', None)) else None
+            rec['high'] = float(row.get('high', 0)) if not pd.isna(row.get('high', None)) else None
+            rec['low'] = float(row.get('low', 0)) if not pd.isna(row.get('low', None)) else None
+            rec['close'] = float(row.get('close', 0)) if not pd.isna(row.get('close', None)) else None
+            rec['volume'] = int(row.get('volume', 0)) if not pd.isna(row.get('volume', None)) else None
+            out_cols.append(rec)
+
+        return jsonify(out_cols)
+
+
     @app.route('/api/check_alpha')
     def api_check_alpha():
         """Check whether ALPHA_VANTAGE_KEY (from env) appears valid by making a small request.
@@ -503,6 +872,55 @@ def create_app(db_path: Optional[str] = None):
             out['rows'].append(r)
 
         return jsonify(out)
+
+
+    # Chart config endpoints
+    @app.route('/api/chart/config', methods=['POST'])
+    def api_chart_config_save():
+        payload = request.get_json(force=True, silent=True) or {}
+        name = payload.get('name')
+        config = payload.get('config')
+        if not name or not isinstance(config, dict):
+            return jsonify({'error': 'name and config (object) required'}), 400
+        try:
+            cid = app.di.save_chart_config(name, config)
+            return jsonify({'ok': True, 'id': cid})
+        except Exception as e:
+            app.logger.exception('Failed to save chart config: %s', e)
+            return jsonify({'error': 'failed to save config', 'detail': str(e)}), 500
+
+    @app.route('/api/chart/config/<name>', methods=['GET', 'DELETE'])
+    def api_chart_config_get_delete(name):
+        if request.method == 'GET':
+            cfg = app.di.get_chart_config(name)
+            if not cfg:
+                return jsonify({'error': 'not found'}), 404
+            return jsonify(cfg)
+        else:
+            ok = app.di.remove_chart_config(name)
+            return jsonify({'ok': bool(ok)})
+
+    @app.route('/api/chart/configs')
+    def api_chart_configs_list():
+        items = app.di.list_chart_configs()
+        return jsonify({'items': items})
+
+
+    @app.route('/api/chart/render', methods=['POST'])
+    def api_chart_render():
+        """Chart rendering endpoint (deprecated in favor of TradingView).
+        
+        Returns 501 to trigger frontend fallback to TradingView widget.
+        """
+        return jsonify({'error': 'chart_rendering_disabled', 'message': 'Use TradingView widget instead'}), 501
+
+    @app.route('/api/chart/render', methods=['GET'])
+    def api_chart_render_get():
+        """Chart rendering endpoint (deprecated in favor of TradingView).
+        
+        Returns 501 to trigger frontend fallback to TradingView widget.
+        """
+        return jsonify({'error': 'chart_rendering_disabled', 'message': 'Use TradingView widget instead'}), 501
 
 
     @app.route('/api/run_update', methods=['POST'])
@@ -626,6 +1044,26 @@ def create_app(db_path: Optional[str] = None):
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
         return response
 
+    @app.route('/api/client_log', methods=['POST'])
+    def api_client_log():
+        """Receive client-side logs (from browser) to help debugging network/JS issues.
+
+        Body JSON: { level: 'info'|'warn'|'error', msg: str }
+        """
+        payload = request.get_json(force=True, silent=True) or {}
+        level = (payload.get('level') or 'info').lower()
+        msg = payload.get('msg') or ''
+        try:
+            if level == 'error':
+                app.logger.error('CLIENT: %s', msg)
+            elif level == 'warn':
+                app.logger.warning('CLIENT: %s', msg)
+            else:
+                app.logger.info('CLIENT: %s', msg)
+        except Exception:
+            pass
+        return jsonify({'ok': True})
+
     return app
 
 
@@ -634,4 +1072,8 @@ app = create_app()
 
 if __name__ == '__main__':
     # Run the dev server when executed as a module: python -m tradingbuddy.api.flask_app
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    # Run without the reloader/debugger to avoid watchdog restarts caused by
+    # third-party library file changes (matplotlib/mplfinance). For development
+    # you can set debug=True explicitly, but production runs should avoid the
+    # reloader when using server-side rendering of charts.
+    app.run(host='127.0.0.1', port=5000, debug=False)
